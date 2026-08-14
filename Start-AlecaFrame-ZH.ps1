@@ -7,6 +7,7 @@ $extensionsRoot = Join-Path $env:LOCALAPPDATA "Overwolf\Extensions\$appId"
 $packagesRoot = Join-Path $env:LOCALAPPDATA "Overwolf\PackagesCache\$appId"
 $stateRoot = Join-Path $env:LOCALAPPDATA "AlecaFrame-ZH-Patch"
 $localizerSource = Join-Path $PSScriptRoot "alecaframe-zh-cn.js"
+$itemTranslationsSource = Join-Path $PSScriptRoot "alecaframe-zh-cn-items.js"
 $targetPages = @(
     "main.html",
     "AFBuilds.html",
@@ -19,6 +20,7 @@ $targetPages = @(
     "tradeFinishedNotification.html"
 )
 $scriptTag = '<script src="assets/js/alecaframe-zh-cn.js"></script>'
+$itemTranslationsScriptTag = '<script src="assets/js/alecaframe-zh-cn-items.js"></script>'
 
 function Write-LauncherLog {
     param([string]$Message)
@@ -190,9 +192,11 @@ function Restore-OfficialFiles {
         Write-LauncherLog "Official OPK unavailable; created local official backup"
     }
 
-    $extraLocalizer = Join-Path $VersionPath "web\assets\js\alecaframe-zh-cn.js"
-    if (Test-Path -LiteralPath $extraLocalizer) {
-        Remove-Item -LiteralPath $extraLocalizer -Force
+    foreach ($extraScript in @("alecaframe-zh-cn.js", "alecaframe-zh-cn-items.js")) {
+        $extraLocalizer = Join-Path $VersionPath "web\assets\js\$extraScript"
+        if (Test-Path -LiteralPath $extraLocalizer) {
+            Remove-Item -LiteralPath $extraLocalizer -Force
+        }
     }
 }
 
@@ -210,7 +214,7 @@ function Add-ChineseFiles {
             $patched = [regex]::Replace(
                 $content,
                 "(?i)</body>",
-                "    $scriptTag`r`n</body>",
+                "    $itemTranslationsScriptTag`r`n    $scriptTag`r`n</body>",
                 1
             )
             [IO.File]::WriteAllText($target, $patched, [Text.UTF8Encoding]::new($false))
@@ -218,6 +222,9 @@ function Add-ChineseFiles {
     }
     Copy-Item -LiteralPath $localizerSource `
         -Destination (Join-Path $webRoot "assets\js\alecaframe-zh-cn.js") `
+        -Force
+    Copy-Item -LiteralPath $itemTranslationsSource `
+        -Destination (Join-Path $webRoot "assets\js\alecaframe-zh-cn-items.js") `
         -Force
 }
 
@@ -286,6 +293,9 @@ try {
     }
     if (-not (Test-Path -LiteralPath $localizerSource)) {
         throw "缺少汉化词库：$localizerSource"
+    }
+    if (-not (Test-Path -LiteralPath $itemTranslationsSource)) {
+        throw "缺少物品汉化词库：$itemTranslationsSource"
     }
 
     $versionDirectory = Get-LatestVersionDirectory
