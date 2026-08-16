@@ -113,6 +113,9 @@
     "Buy from WFMarket": "从 WF市场购买",
     "Subsumed": "已吞噬",
     "Subsumed into the Helminth System": "已被 Helminth 吞噬",
+    "Helminth done": "已吞噬",
+    "Prime resurgence": "PRIME 重生",
+    "Prime Resurgence": "PRIME 重生",
     "WTB": "收购",
     "WTB:": "收购：",
     "WTS": "出售",
@@ -503,49 +506,32 @@
     }
   }
 
-  function filterFoundryItemsByChineseSearch(items, searchTerm) {
-    const terms = searchTerm
-      .toLowerCase()
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean);
-    if (!terms.length) return items;
-
-    return items.filter(item => {
-      const englishName = item?.name || item?.readableName || "";
-      const searchableName = `${getChineseSearchableItemName(englishName)} ${englishName.toLowerCase()}`;
-      return terms.every(term => searchableName.includes(term));
-    });
-  }
-
   function enableChineseFoundrySearch() {
     const foundryApp = window.foundryApp;
     const foundryPlugin = window.plugin?.get?.();
     if (!foundryApp?.refresh || !foundryPlugin?.getFilteredFoundry || foundryApp.__zhChineseSearchEnabled) return;
 
-    const originalRefresh = foundryApp.refresh.bind(foundryApp);
     const originalGetFilteredFoundry = foundryPlugin.getFilteredFoundry.bind(foundryPlugin);
-    foundryApp.refresh = function (showAll = false) {
-      const originalSearch = this.selectedSearch || "";
-      if (!hasChineseCharacters(originalSearch)) return originalRefresh(showAll);
-
-      foundryPlugin.getFilteredFoundry = function (filterSettings, fullInventory, callback) {
-        const filters = JSON.parse(filterSettings);
-        filters.search = "";
-        const wrappedCallback = (success, data) => {
-          foundryPlugin.getFilteredFoundry = originalGetFilteredFoundry;
-          if (!success) return callback(success, data);
-          const filteredItems = filterFoundryItemsByChineseSearch(JSON.parse(data), originalSearch);
-          callback(true, JSON.stringify(filteredItems));
-        };
-        return originalGetFilteredFoundry(JSON.stringify(filters), fullInventory, wrappedCallback);
-      };
-      try {
-        return originalRefresh(showAll);
-      } catch (error) {
-        foundryPlugin.getFilteredFoundry = originalGetFilteredFoundry;
-        throw error;
+    foundryPlugin.getFilteredFoundry = function (filterSettings, fullInventory, callback) {
+      const filters = JSON.parse(filterSettings);
+      const searchTerm = filters.search || "";
+      if (!hasChineseCharacters(searchTerm)) {
+        return originalGetFilteredFoundry(filterSettings, fullInventory, callback);
       }
+
+      // The native plugin only searches English. Fetch the current category
+      // without a search term, then filter its results by Chinese or English name.
+      filters.search = "";
+      return originalGetFilteredFoundry(JSON.stringify(filters), fullInventory, (success, data) => {
+        if (!success) return callback(success, data);
+        try {
+          const filteredItems = filterNamedItemsByChineseSearch(JSON.parse(data), searchTerm, ["name"]);
+          return callback(true, JSON.stringify(filteredItems));
+        } catch (error) {
+          console.warn("[AlecaFrame-ZH] Foundry Chinese search failed", error);
+          return callback(success, data);
+        }
+      });
     };
     foundryApp.__zhChineseSearchEnabled = true;
   }
@@ -1010,10 +996,21 @@
   }
 
   function addMarketOrderTitleTranslations(panel) {
+    const isVueOrderList = panel.id === "MyOrdersTab" || panel.id === "MyContractsTab";
     for (const label of panel.querySelectorAll('.wfmItemName')) {
       const englishName = label.dataset.zhMarketOrderEnglish || label.textContent?.trim();
       const chineseName = translateDisplayOnlyItemName(englishName);
       if (!englishName || !chineseName || chineseName === englishName) continue;
+
+      // Vue owns the names in My Orders / My Contracts. Keep its original text
+      // node intact and expose the Chinese line through CSS, otherwise a future
+      // Vue refresh can fail to reconcile the card and hide returned orders.
+      if (isVueOrderList) {
+        label.dataset.zhMarketOrderEnglish = englishName;
+        label.dataset.zhMarketOrderChinese = chineseName;
+        continue;
+      }
+
       if (label.dataset.zhMarketOrderEnglish !== englishName) {
         label.dataset.zhMarketOrderEnglish = englishName;
         label.replaceChildren();
@@ -1040,6 +1037,12 @@
   }
 
   function translateFoundryDetails() {
+    // This dialog is owned by Vue. Writing textContent into its component rows
+    // can remove Vue-managed text nodes while a new detail response is being
+    // rendered, leaving a new model beside components from the previous item.
+    // Keep this path native until it exposes a display-only translation hook.
+    return;
+
     const modal = document.getElementById("modalFroundryDetails");
     if (!modal || modal.offsetParent === null) return;
 
@@ -1121,6 +1124,8 @@
 
   function translateTree(root) {
     if (!root) return;
+    const element = root.nodeType === Node.ELEMENT_NODE ? root : root.parentElement;
+    if (element?.closest?.("#modalFroundryDetails")) return;
     if (root.nodeType === Node.TEXT_NODE) {
       const parent = root.parentElement;
       if (!parent) return;
@@ -1210,8 +1215,8 @@
       background-image: none !important;
     }
     #inventoryWFMtabBUYSELL .wfmItemName,
-    #MyOrdersTab .wfmItemName,
-    #MyContractsTab .wfmItemName {
+    #MyOrdersTab .wfmItemName[data-zh-market-order-chinese],
+    #MyContractsTab .wfmItemName[data-zh-market-order-chinese] {
       align-items: center;
       display: flex;
       flex: 1 1 auto;
@@ -1222,6 +1227,27 @@
       overflow: hidden;
       white-space: normal;
     }
+    #MyOrdersTab .wfmItemName[data-zh-market-order-chinese]::before,
+    #MyContractsTab .wfmItemName[data-zh-market-order-chinese]::before {
+      color: #ffffff;
+      content: attr(data-zh-market-order-chinese);
+      display: block;
+      font-size: 14px;
+      line-height: 13px;
+      max-width: 100%;
+      overflow: hidden;
+      padding-top: 1px;
+      text-align: center;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      width: 100%;
+    }
+    #MyOrdersTab .wfmItemName[data-zh-market-order-chinese],
+    #MyContractsTab .wfmItemName[data-zh-market-order-chinese] {
+      color: #bdc9e7;
+      font-size: 11px;
+      line-height: 11px;
+    }
     #MyOrdersTab .wfmItemTop,
     #MyContractsTab .wfmItemTop {
       height: 32px;
@@ -1231,11 +1257,7 @@
       height: 74px;
     }
     #inventoryWFMtabBUYSELL .wfmItemName > .zh-market-order-name-cn,
-    #inventoryWFMtabBUYSELL .wfmItemName > .zh-market-order-name-en,
-    #MyOrdersTab .wfmItemName > .zh-market-order-name-cn,
-    #MyOrdersTab .wfmItemName > .zh-market-order-name-en,
-    #MyContractsTab .wfmItemName > .zh-market-order-name-cn,
-    #MyContractsTab .wfmItemName > .zh-market-order-name-en {
+    #inventoryWFMtabBUYSELL .wfmItemName > .zh-market-order-name-en {
       display: block;
       max-width: 100%;
       overflow: hidden;
@@ -1244,17 +1266,13 @@
       white-space: nowrap;
       width: 100%;
     }
-    #inventoryWFMtabBUYSELL .wfmItemName > .zh-market-order-name-cn,
-    #MyOrdersTab .wfmItemName > .zh-market-order-name-cn,
-    #MyContractsTab .wfmItemName > .zh-market-order-name-cn {
+    #inventoryWFMtabBUYSELL .wfmItemName > .zh-market-order-name-cn {
       color: #ffffff;
       font-size: 14px;
       line-height: 13px;
       padding-top: 1px;
     }
-    #inventoryWFMtabBUYSELL .wfmItemName > .zh-market-order-name-en,
-    #MyOrdersTab .wfmItemName > .zh-market-order-name-en,
-    #MyContractsTab .wfmItemName > .zh-market-order-name-en {
+    #inventoryWFMtabBUYSELL .wfmItemName > .zh-market-order-name-en {
       color: #bdc9e7;
       font-size: 11px;
       line-height: 11px;
@@ -1399,12 +1417,35 @@
   }
 
   function scheduleFoundryDetailsTranslation() {
-    if (foundryDetailsTranslationScheduled) return;
-    foundryDetailsTranslationScheduled = true;
-    setTimeout(() => {
-      foundryDetailsTranslationScheduled = false;
-      translateFoundryDetails();
-    }, 0);
+    // See translateFoundryDetails: this modal must not be mutated outside Vue.
+  }
+
+  function installFoundryDetailsRequestGuard() {
+    const detailsApp = window.foundryDetailsApp;
+    const nativePlugin = window.plugin?.get?.();
+    if (!detailsApp?.open || !nativePlugin?.GetFoundryDetails || detailsApp.__zhRequestGuardInstalled) return;
+
+    const originalOpen = detailsApp.open.bind(detailsApp);
+    const originalGetFoundryDetails = nativePlugin.GetFoundryDetails.bind(nativePlugin);
+    let latestRequest = 0;
+
+    detailsApp.open = function (...args) {
+      const request = ++latestRequest;
+      nativePlugin.GetFoundryDetails = function (uniqueID, callback) {
+        // The native open() invokes this synchronously. The callback itself is
+        // asynchronous, so retain this request number for its eventual result.
+        return originalGetFoundryDetails(uniqueID, (success, data, ...callbackArgs) => {
+          if (request !== latestRequest) return;
+          callback(success, data, ...callbackArgs);
+        });
+      };
+      try {
+        return originalOpen(...args);
+      } finally {
+        nativePlugin.GetFoundryDetails = originalGetFoundryDetails;
+      }
+    };
+    detailsApp.__zhRequestGuardInstalled = true;
   }
 
   function flush() {
@@ -1437,7 +1478,7 @@
         ? mutation.target
         : mutation.target.parentElement;
       if (target?.closest?.("#modalFroundryDetails")) {
-        scheduleFoundryDetailsTranslation();
+        continue;
       }
       if (isMarketPanelElement(target)) {
         scheduleMarketTranslation();
@@ -1447,6 +1488,7 @@
       if (mutation.type === "characterData") pending.add(mutation.target.parentElement);
       for (const node of mutation.addedNodes ?? []) {
         const parent = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        if (parent?.closest?.("#modalFroundryDetails")) continue;
         if (isMarketPanelElement(parent)) {
           scheduleMarketTranslation();
           continue;
@@ -1522,7 +1564,6 @@
     document.documentElement.lang = "zh-CN";
     translateTree(document);
     translateTimerStatuses();
-    translateFoundryDetails();
     if (!timerStatusRefreshInstalled) {
       timerStatusRefreshInstalled = true;
       setInterval(translateTimerStatuses, 5000);
@@ -1530,6 +1571,7 @@
     translateAllMarketPanels();
     waitForChineseInventorySearch();
     waitForChineseFoundrySearch();
+    installFoundryDetailsRequestGuard();
     waitForChineseMarketSearch();
     waitForChineseWfmListSearch();
     waitForChineseUnveiledRivenSearch();
