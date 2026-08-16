@@ -5,6 +5,7 @@ $extensionsRoot = Join-Path $env:LOCALAPPDATA "Overwolf\Extensions\$appId"
 $packagesRoot = Join-Path $env:LOCALAPPDATA "Overwolf\PackagesCache\$appId"
 $stateRoot = Join-Path $env:LOCALAPPDATA "AlecaFrame-ZH-Patch"
 $targetPages = @(
+    "background.html",
     "main.html",
     "AFBuilds.html",
     "InGameNotification.html",
@@ -81,8 +82,11 @@ if ($versionDirectory) {
     }
 
     $extra = Join-Path $versionDirectory.FullName "web\assets\js\alecaframe-zh-cn.js"
-    if (Test-Path -LiteralPath $extra) {
-        Remove-Item -LiteralPath $extra -Force
+    foreach ($extraName in @("alecaframe-zh-cn.js", "alecaframe-zh-cn-items.js", "alecaframe-zh-cn-relic-ocr.js", "alecaframe-zh-cn-relic-overlay.js", "alecaframe-zh-cn-relic-recommendation.js", "alecaframe-zh-cn-relic-planner-cache.js", "alecaframe-zh-cn-inventory-price-sync.js", "alecaframe-zh-cn-inventory-images.js")) {
+        $extra = Join-Path $versionDirectory.FullName "web\assets\js\$extraName"
+        if (Test-Path -LiteralPath $extra) {
+            Remove-Item -LiteralPath $extra -Force
+        }
     }
 }
 
