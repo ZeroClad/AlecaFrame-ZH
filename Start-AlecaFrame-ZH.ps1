@@ -711,8 +711,11 @@ function Get-AlecaFrameRenderer {
 function Wait-OverwolfExtensionReady {
     param([datetime]$StartedAt)
 
+    # Overwolf can move or delay its trace logs after a Windows restart. The
+    # launcher below also retries the actual app launch, so waiting only for a
+    # specific trace line turns a slow cold start into a false failure.
     $traceRoot = Join-Path $env:LOCALAPPDATA "Overwolf\Log"
-    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
         Start-Sleep -Milliseconds 500
         $trace = Get-ChildItem -LiteralPath $traceRoot -Filter "Trace_*.log" -File `
             -ErrorAction SilentlyContinue |
@@ -728,7 +731,7 @@ function Wait-OverwolfExtensionReady {
             }
         }
     }
-    throw "Overwolf 启动超时，未能加载 AlecaFrame 扩展。"
+    Write-LauncherLog "Overwolf extension trace was not available; continuing with renderer-based readiness check"
 }
 
 function Start-AlecaFrameAndWait {
@@ -813,7 +816,7 @@ try {
 
     # First launch uses untouched official files so Overwolf can complete its normal
     # integrity check and initialize AlecaFrame.
-    $originalRenderer = Start-AlecaFrameAndWait -TimeoutSeconds 60
+    $originalRenderer = Start-AlecaFrameAndWait -TimeoutSeconds 120
     Start-Sleep -Seconds 4
 
     Add-ChineseFiles -VersionPath $versionDirectory.FullName -EnableRelicOcr $enableRelicOcr
@@ -830,7 +833,7 @@ try {
         }
     Start-Sleep -Seconds 3
 
-    $null = Start-AlecaFrameAndWait -TimeoutSeconds 60
+    $null = Start-AlecaFrameAndWait -TimeoutSeconds 120
 
     $loaded = $false
     $mainLog = Join-Path $env:LOCALAPPDATA "Overwolf\Log\Apps\AlecaFrame\MainWindow.html.log"
