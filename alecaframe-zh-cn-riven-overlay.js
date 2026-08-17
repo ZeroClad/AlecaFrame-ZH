@@ -216,6 +216,7 @@
     if (/^穿透$/.test(value)) return "穿透";
     if (/^暴击伤害?$/.test(value)) return "暴击伤害";
     if (/^暴击(?:几|几率)?$/.test(value)) return "暴击几率";
+    if (/^射速(?:（.*)?$/.test(value)) return "射速";
     if (/^触发时间/.test(value)) return "触发时间";
     if (/^触发/.test(value)) return "触发几率";
     if (/^装填/.test(value)) return "装填速度";
@@ -481,7 +482,7 @@
     if (/^暴击伤害?$/.test(value)) return "暴击伤害";
     if (/^暴击(?:几|几率)?$/.test(value)) return "暴击几率";
     if (/^伤害$/.test(value)) return "伤害";
-    if (/^射速$/.test(value)) return "射速";
+    if (/^射速(?:（.*)?$/.test(value)) return "射速";
     if (/^触发时间/.test(value)) return "触发时间";
     if (/^触发/.test(value)) return "触发几率";
     if (/^装填/.test(value)) return "装填速度";
@@ -803,14 +804,4 @@
   refreshNativeLayout();
   setInterval(refreshNativeLayout, 350);
 })();
-
-
-
-
-
-
-
-
-
-
 

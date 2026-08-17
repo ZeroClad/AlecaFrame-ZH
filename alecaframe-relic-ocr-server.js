@@ -214,17 +214,38 @@ const localizedTitleTokens = localizedNameIndex
   .sort((left, right) => right.normalizedChinese.length - left.normalizedChinese.length);
 
 // Riven cards use the base weapon name followed by a random Latin riven
-// surname (for example "沙皇 Visitis").  This reverse index is deliberately
-// separate from reward-title resolution: a riven can apply to variants such
-// as Kuva/Tenet weapons, so this step identifies only the printed base name
-// and never guesses a variant.
+// surname (for example "沙皇 Visitis"). Never build this index from the
+// complete UI translation table: it also contains MOD names such as
+// "爆发装填 Prime", which previously made an ordinary MOD configuration
+// page open the Riven overlay. Only official weapon-cache entries with a
+// Riven disposition may become Riven title candidates.
+const rivenWeaponCacheFiles = ["Primary.json", "Secondary.json", "Melee.json", "Arch-Gun.json", "Arch-Melee.json", "SentinelWeapons.json"];
+const rivenWeaponCacheRoot = path.join(process.env.LOCALAPPDATA || "", "AlecaFrame", "cachedData", "json");
+const rivenWeaponNames = new Set();
+for (const cacheFile of rivenWeaponCacheFiles) {
+  try {
+    const cachedItems = JSON.parse(fs.readFileSync(path.join(rivenWeaponCacheRoot, cacheFile), "utf8"));
+    if (!Array.isArray(cachedItems)) continue;
+    for (const item of cachedItems) {
+      // disposition is present on actual weapons that can have a Riven.
+      // Components, MODs, blueprints and translated UI labels stay out.
+      if (item && typeof item.name === "string" && item.name.trim() && Number.isFinite(Number(item.disposition))) {
+        rivenWeaponNames.add(item.name.trim());
+      }
+    }
+  } catch (error) {
+    audit("RIVEN_WEAPON_CACHE_SKIPPED", cacheFile + ": " + String(error && error.code || error && error.message || error));
+  }
+}
 const rivenWeaponCandidates = [...new Map(
   translationEntries
+    .filter(([english]) => rivenWeaponNames.has(english))
     .map(([english, chinese]) => ({ english, chinese: String(chinese || "").trim(), normalizedChinese: normalizeText(chinese) }))
     .filter((entry) => entry.normalizedChinese.length >= 2)
-    .map((entry) => [`${entry.normalizedChinese}\u0000${entry.english}`, entry])
+    .map((entry) => [entry.normalizedChinese + "\u0000" + entry.english, entry])
 ).values()]
   .sort((left, right) => right.normalizedChinese.length - left.normalizedChinese.length);
+audit("RIVEN_WEAPON_CANDIDATE_INDEX", "officialWeapons=" + rivenWeaponNames.size + " localizedCandidates=" + rivenWeaponCandidates.length);
 
 // Some rewards intentionally retain their English base name in the Chinese
 // client (for example Forma).  These are still entries in the shared table,
@@ -888,6 +909,15 @@ function normalizeRivenLines(workerResult) {
     .sort((left, right) => left.top - right.top || left.left - right.left);
 }
 
+// Fixed UI words are not randomized Riven surnames. Rejecting them
+// prevents ordinary names such as "爆发装填 Prime" from looking like a
+// Chinese weapon followed by a Latin Riven surname.
+const nonRivenSurnameTokens = new Set(["prime", "blueprint", "set", "rank", "mod", "riven", "owned", "crafted"]);
+function isPlausibleRivenSurname(value) {
+  const surname = String(value || "").toLowerCase();
+  return /^[a-z]{3,16}$/.test(surname) && !nonRivenSurnameTokens.has(surname);
+}
+
 function resolveChineseRivenWeapon(rivenName) {
   const normalizedName = normalizeText(rivenName);
   if (!normalizedName) return null;
@@ -901,7 +931,7 @@ function resolveChineseRivenWeapon(rivenName) {
     if (!normalizedName.startsWith(candidate.normalizedChinese)) continue;
     // A riven surname is Latin text. Requiring it prevents a short Chinese
     // item name elsewhere in the crop from being misclassified as a weapon.
-    if (!/^[a-z]{3,}$/i.test(remainder)) continue;
+    if (!isPlausibleRivenSurname(remainder)) continue;
     return {
       chinese: candidate.chinese,
       english: candidate.english,
@@ -921,7 +951,7 @@ function resolveChineseRivenWeapon(rivenName) {
     if (normalizedName.length <= matchedLength) continue;
     const possibleWeapon = normalizedName.slice(0, matchedLength);
     const possibleRemainder = normalizedName.slice(matchedLength);
-    if (!isOneEditAway(possibleWeapon, candidate.normalizedChinese) || !/^[a-z]{3,}$/i.test(possibleRemainder)) continue;
+    if (!isOneEditAway(possibleWeapon, candidate.normalizedChinese) || !isPlausibleRivenSurname(possibleRemainder)) continue;
     return {
       chinese: candidate.chinese,
       english: candidate.english,
@@ -995,7 +1025,13 @@ function parseRivenCardLines(lines, titleLine = null, cardIndex = 0) {
     traits,
     signedTraitCount,
     titleCenter,
-    ignoredLines
+    ignoredLines,
+    // Browser-side publishing must not trust a generic one-card OCR result
+    // from another game screen. This evidence is deliberately conservative.
+    chatLinkEvidence: Boolean(
+      rivenName && weapon && weapon.matchQuality === "exact" &&
+      isPlausibleRivenSurname(weapon.surname) && signedTraitCount >= 2
+    )
   };
 }
 

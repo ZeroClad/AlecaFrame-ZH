@@ -277,6 +277,10 @@
     if (sourceCards.length !== 1) return false;
     const observedCard = sourceCards[0];
     if (!observedCard || !observedCard.detected || !observedCard.weaponNameEnglishCandidate) return false;
+    if (observedCard.chatLinkEvidence !== true) {
+      audit("RIVEN_CHAT_SCENE_REJECTED", "missing-strict-chat-evidence " + String(observedCard.rivenName || observedCard.weaponNameEnglishCandidate));
+      return false;
+    }
     stableChatCard = mergeChatCard(stableChatCard, observedCard);
     const card = stableChatCard;
     if (!card || card.traits.length < 2) return false;
