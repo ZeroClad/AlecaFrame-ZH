@@ -16,9 +16,101 @@ if (!translationsPath || !ocrScriptPath || !outputDirectory || !captureScriptPat
 fs.mkdirSync(outputDirectory, { recursive: true });
 const auditPath = path.join(outputDirectory, "bridge-audit.log");
 const latestRewardPath = path.join(outputDirectory, "latest-reward.json");
+// This is intentionally independent from reward and relic-planner state.
+// Riven OCR is diagnostic-only until a real Chinese reroll card sample has
+// been captured and its line layout has been validated.
+const latestRivenPath = path.join(outputDirectory, "latest-riven.json");
+const rivenCrop = Object.freeze({
+  relative: true,
+  // Same coarse crop as AlecaFrameClientLib.RivenOverlays.RivenReroll:
+  // left=34.25%, top=41.60%, right=65.75%, bottom=85.00%.
+  left: 0.3425,
+  top: 0.416,
+  right: 0.6575,
+  bottom: 0.85
+});
+let rivenCaptureInProgress = false;
+let lastRivenCaptureAt = 0;
+
+// OCR screenshots exist only to diagnose recognition/layout failures.  Keep a
+// small recent history for each independent capture path so diagnostic output
+// cannot grow indefinitely during normal play.  Runtime result JSON files and
+// the Paddle model files are deliberately outside these retention groups.
+const diagnosticScreenshotGroups = Object.freeze([
+  (name) => name.startsWith("riven-raw-"),
+  (name) => name.startsWith("refinement-paddle-"),
+  (name) => name.startsWith("refinement-zh-"),
+  (name) => name.startsWith("refinement-") && !name.startsWith("refinement-paddle-") && !name.startsWith("refinement-zh-"),
+  (name) => name.startsWith("capture-"),
+  (name) => name.startsWith("relic-zh-"),
+  (name) => name.startsWith("foreground-")
+]);
+const diagnosticScreenshotLimit = 20;
+
+function trimDiagnosticScreenshots() {
+  let files;
+  try {
+    files = fs.readdirSync(outputDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".png"));
+  } catch {
+    return;
+  }
+
+  for (const matchesGroup of diagnosticScreenshotGroups) {
+    const matches = files
+      .filter((entry) => matchesGroup(entry.name))
+      .map((entry) => {
+        const filePath = path.join(outputDirectory, entry.name);
+        try {
+          return { filePath, modifiedAt: fs.statSync(filePath).mtimeMs };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.modifiedAt - left.modifiedAt);
+
+    for (const stale of matches.slice(diagnosticScreenshotLimit)) {
+      try {
+        fs.unlinkSync(stale.filePath);
+      } catch {
+        // A worker may still have just released a screenshot.  Retention is
+        // best-effort and will retry after the next capture.
+      }
+    }
+  }
+}
+
+const auditLogMaximumBytes = 5 * 1024 * 1024;
+const auditLogRetainedBytes = 2 * 1024 * 1024;
+
+function trimAuditLog() {
+  try {
+    const size = fs.statSync(auditPath).size;
+    if (size <= auditLogMaximumBytes) return;
+    const start = Math.max(0, size - auditLogRetainedBytes);
+    const descriptor = fs.openSync(auditPath, "r");
+    const buffer = Buffer.alloc(size - start);
+    try {
+      fs.readSync(descriptor, buffer, 0, buffer.length, start);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+    const firstNewline = buffer.indexOf(0x0a);
+    const retained = firstNewline >= 0 ? buffer.subarray(firstNewline + 1) : buffer;
+    fs.writeFileSync(auditPath, retained);
+  } catch {
+    // Diagnostic logging must never interrupt OCR or overlay updates.
+  }
+}
 
 function audit(event, detail = "") {
-  fs.appendFileSync(auditPath, `${new Date().toISOString()} ${event}${detail ? ` ${detail}` : ""}\n`);
+  try {
+    trimAuditLog();
+    fs.appendFileSync(auditPath, `${new Date().toISOString()} ${event}${detail ? ` ${detail}` : ""}\n`);
+  } catch {
+    // Audit output is optional; recognition remains available if the log is locked.
+  }
 }
 
 function saveLatestReward(result) {
@@ -119,6 +211,19 @@ for (const [english, chinese] of translationEntries) {
 // line can yield several card titles without guessing from visual spacing.
 const localizedTitleTokens = localizedNameIndex
   .filter((entry) => entry.normalizedChinese.length >= 4)
+  .sort((left, right) => right.normalizedChinese.length - left.normalizedChinese.length);
+
+// Riven cards use the base weapon name followed by a random Latin riven
+// surname (for example "沙皇 Visitis").  This reverse index is deliberately
+// separate from reward-title resolution: a riven can apply to variants such
+// as Kuva/Tenet weapons, so this step identifies only the printed base name
+// and never guesses a variant.
+const rivenWeaponCandidates = [...new Map(
+  translationEntries
+    .map(([english, chinese]) => ({ english, chinese: String(chinese || "").trim(), normalizedChinese: normalizeText(chinese) }))
+    .filter((entry) => entry.normalizedChinese.length >= 2)
+    .map((entry) => [`${entry.normalizedChinese}\u0000${entry.english}`, entry])
+).values()]
   .sort((left, right) => right.normalizedChinese.length - left.normalizedChinese.length);
 
 // Some rewards intentionally retain their English base name in the Chinese
@@ -768,6 +873,250 @@ function captureForegroundWarframe() {
   });
 }
 
+function normalizeRivenLines(workerResult) {
+  const lines = Array.isArray(workerResult && workerResult.lines) ? workerResult.lines : [];
+  return lines
+    .filter((line) => line && typeof line.text === "string" && line.text.trim())
+    .map((line) => ({
+      text: line.text.trim(),
+      confidence: Number.isFinite(Number(line.confidence)) ? Number(line.confidence) : 0,
+      left: Number(line.left || 0),
+      top: Number(line.top || 0),
+      right: Number(line.right || 0),
+      bottom: Number(line.bottom || 0)
+    }))
+    .sort((left, right) => left.top - right.top || left.left - right.left);
+}
+
+function resolveChineseRivenWeapon(rivenName) {
+  const normalizedName = normalizeText(rivenName);
+  if (!normalizedName) return null;
+  // Prefer an exact weapon prefix across the entire catalog before attempting
+  // OCR recovery.  Otherwise a preceding one-glyph candidate (for example
+  // 月神) can steal an exact later candidate (鳄神) merely because their names
+  // differ by one Chinese character.
+  for (const candidate of rivenWeaponCandidates) {
+    const matchedLength = candidate.normalizedChinese.length;
+    const remainder = normalizedName.slice(matchedLength);
+    if (!normalizedName.startsWith(candidate.normalizedChinese)) continue;
+    // A riven surname is Latin text. Requiring it prevents a short Chinese
+    // item name elsewhere in the crop from being misclassified as a weapon.
+    if (!/^[a-z]{3,}$/i.test(remainder)) continue;
+    return {
+      chinese: candidate.chinese,
+      english: candidate.english,
+      surname: remainder,
+      matchQuality: "exact"
+    };
+  }
+  // The dim, unselected card can lose or confuse one Chinese glyph.  Only
+  // after every exact prefix has failed, accept exactly one substituted glyph
+  // when the remaining text is a plausible Latin riven surname.
+  for (const candidate of rivenWeaponCandidates) {
+    const matchedLength = candidate.normalizedChinese.length;
+    // The dim, unselected card can lose or confuse one Chinese glyph. Accept
+    // exactly one substituted glyph only when the remaining text is still a
+    // plausible Latin riven surname; this recovers "少皇Visitis" as "沙皇"
+    // without turning unrelated Chinese UI text into a weapon name.
+    if (normalizedName.length <= matchedLength) continue;
+    const possibleWeapon = normalizedName.slice(0, matchedLength);
+    const possibleRemainder = normalizedName.slice(matchedLength);
+    if (!isOneEditAway(possibleWeapon, candidate.normalizedChinese) || !/^[a-z]{3,}$/i.test(possibleRemainder)) continue;
+    return {
+      chinese: candidate.chinese,
+      english: candidate.english,
+      surname: possibleRemainder,
+      matchQuality: "one-glyph-recovery"
+    };
+  }
+  return null;
+}
+
+function getLineCenter(line) {
+  return (Number(line.left || 0) + Number(line.right || 0)) / 2;
+}
+
+function parseRivenCardLines(lines, titleLine = null, cardIndex = 0) {
+  const ignoredLines = [];
+  const traits = [];
+  let rivenName = titleLine ? String(titleLine.text || "").trim() : null;
+  let rank = null;
+  for (const line of lines) {
+    if (titleLine === line) continue;
+    const text = String(line.text || "").trim();
+    if (!text) continue;
+    const trait = text.match(/^([+-])?\s*(\d+(?:\.\d+)?)\s*(%?)\s*(.+)$/);
+    if (trait && trait[4].trim() && !/^\d+$/.test(trait[4].trim())) {
+      traits.push({
+        sign: trait[1] || null,
+        value: Number(trait[2]),
+        unit: trait[3] || "",
+        text: trait[4].trim(),
+        raw: text,
+        confidence: line.confidence,
+        signRecognized: Boolean(trait[1])
+      });
+      continue;
+    }
+    // Chinese faction damage uses `x1.55 对 Grineer 的伤害` rather than a
+    // percentage. Preserve it as a real positive riven stat.
+    const multiplierTrait = text.match(/^x\s*(\d+(?:\.\d+)?)\s*(对\s*(?:Grineer|Corpus|Infested)\s*的?伤害)$/i);
+    if (multiplierTrait) {
+      traits.push({
+        sign: "+", value: Number(multiplierTrait[1]), unit: "x",
+        text: multiplierTrait[2].replace(/\s+/g, "").replace("的伤害", "伤害"),
+        raw: text, confidence: line.confidence, signRecognized: true, isMultiplier: true
+      });
+      continue;
+    }
+    const rankMatch = text.match(/^段位\s*(\d{1,2})$/);
+    if (rankMatch) {
+      rank = Number(rankMatch[1]);
+      continue;
+    }
+    if (!rivenName && resolveChineseRivenWeapon(text)) {
+      rivenName = text;
+      continue;
+    }
+    ignoredLines.push(text);
+  }
+  const weapon = rivenName ? resolveChineseRivenWeapon(rivenName) : null;
+  const titleCenter = titleLine ? getLineCenter(titleLine) : null;
+  const signedTraitCount = traits.filter((trait) => trait.signRecognized).length;
+  return {
+    cardIndex,
+    detected: Boolean(rivenName && weapon && traits.length > 0),
+    rivenName,
+    weaponNameChinese: weapon ? weapon.chinese : null,
+    weaponNameEnglishCandidate: weapon ? weapon.english : null,
+    rivenSurname: weapon ? weapon.surname : null,
+    weaponMatchQuality: weapon ? weapon.matchQuality : null,
+    rank,
+    traits,
+    signedTraitCount,
+    titleCenter,
+    ignoredLines
+  };
+}
+
+function resolvePaddleRivenDiagnostic(lines) {
+  // A reroll result shows two cards. Their selected state moves the cards,
+  // so fixed left/right percentages are unreliable; title positions define
+  // the two card columns instead.
+  const titleLines = lines
+    .filter((line) => resolveChineseRivenWeapon(line.text))
+    .sort((left, right) => left.left - right.left);
+  const centers = titleLines.map(getLineCenter);
+  let cardGroups = [];
+  if (titleLines.length >= 2 && centers[centers.length - 1] - centers[0] >= 160) {
+    cardGroups = titleLines.map((titleLine, cardIndex) => ({ titleLine, cardIndex, lines: [] }));
+    for (const line of lines) {
+      const center = getLineCenter(line);
+      let nearest = 0;
+      for (let index = 1; index < centers.length; index += 1) {
+        if (Math.abs(center - centers[index]) < Math.abs(center - centers[nearest])) nearest = index;
+      }
+      cardGroups[nearest].lines.push(line);
+    }
+  } else {
+    cardGroups = [{ titleLine: titleLines[0] || null, cardIndex: 0, lines }];
+  }
+  const cards = cardGroups
+    .map((group) => parseRivenCardLines(group.lines, group.titleLine, group.cardIndex))
+    .filter((card) => card.detected);
+  const selectedCard = cards.length > 1
+    ? cards.reduce((best, card) => card.signedTraitCount > best.signedTraitCount ? card : best)
+    : cards[0] || parseRivenCardLines(lines, titleLines[0] || null);
+  const success = Boolean(selectedCard && selectedCard.detected);
+  const selectedCardIndex = success && cards.length > 1 ? selectedCard.cardIndex : null;
+  const comparison = cards.length >= 2 ? {
+    selectedCardIndex,
+    cardOrder: cards.map((card) => ({
+      cardIndex: card.cardIndex,
+      side: card.titleCenter < selectedCard.titleCenter ? "left-of-selected" : card.titleCenter > selectedCard.titleCenter ? "right-of-selected" : "selected",
+      rivenName: card.rivenName,
+      signedTraitCount: card.signedTraitCount
+    }))
+  } : null;
+  return {
+    success,
+    phase: cards.length >= 2 ? "reroll-comparison" : success ? "selected-for-reroll" : "unrecognized",
+    rivenName: selectedCard.rivenName,
+    weaponNameChinese: selectedCard.weaponNameChinese,
+    weaponNameEnglishCandidate: selectedCard.weaponNameEnglishCandidate,
+    rivenSurname: selectedCard.rivenSurname,
+    rank: selectedCard.rank,
+    traits: selectedCard.traits,
+    ignoredLines: selectedCard.ignoredLines,
+    cards,
+    comparison,
+    reason: success ? null : "The captured crop did not contain a complete Chinese riven title and at least one trait."
+  };
+}
+
+async function processRivenScreenshot(imagePath) {
+  if (!fs.existsSync(imagePath)) {
+    return { success: false, reason: "Riven screenshot file disappeared before OCR could read it." };
+  }
+  const stamp = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const snapshotPath = path.join(outputDirectory, `riven-raw-${stamp}.png`);
+  try {
+    fs.copyFileSync(imagePath, snapshotPath);
+  } catch (error) {
+    return { success: false, reason: `Unable to preserve riven screenshot: ${error.message}` };
+  }
+  trimDiagnosticScreenshots();
+  const workerResult = await runPaddleWorker(snapshotPath, rivenCrop);
+  if (!workerResult || !workerResult.success) {
+    return { success: false, reason: workerResult && workerResult.reason || "Paddle could not read the riven crop." };
+  }
+  const lines = normalizeRivenLines(workerResult);
+  const parsed = resolvePaddleRivenDiagnostic(lines);
+  const result = {
+    success: true,
+    screenKind: "riven-diagnostic",
+    capturedAt: Date.now(),
+    sourcePath: snapshotPath,
+    crop: rivenCrop,
+    imageWidth: workerResult.imageWidth,
+    imageHeight: workerResult.imageHeight,
+    lines,
+    parsed,
+    rawText: lines.map((line) => line.text).join("\n"),
+    recognitionEngine: "paddle-riven-diagnostic"
+  };
+  fs.writeFileSync(latestRivenPath, JSON.stringify(result, null, 2), "utf8");
+  audit("RIVEN_PADDLE_RESULT", lines.map((line) => `${line.text} (${line.confidence.toFixed(2)})`).join(" | ").slice(0, 1200));
+  audit("RIVEN_PARSE_RESULT", parsed.success
+    ? `${parsed.weaponNameEnglishCandidate} rank=${parsed.rank === null ? "?" : parsed.rank} traits=${parsed.traits.length}`
+    : parsed.reason);
+  return result;
+}
+
+async function captureRivenWithPaddle() {
+  const now = Date.now();
+  if (rivenCaptureInProgress) {
+    return { success: false, reason: "A riven diagnostic capture is already in progress." };
+  }
+  if (now - lastRivenCaptureAt < 2000) {
+    return { success: false, reason: "Riven diagnostic capture is cooling down." };
+  }
+  rivenCaptureInProgress = true;
+  lastRivenCaptureAt = now;
+  try {
+    audit("RIVEN_CAPTURE_REQUESTED");
+    const capture = await captureForegroundWarframe();
+    if (!capture.success || !capture.path) {
+      audit("RIVEN_CAPTURE_SKIPPED_NOT_FOREGROUND", capture.reason || "Warframe is not foreground.");
+      return capture;
+    }
+    audit("RIVEN_CAPTURE_SUCCESS", capture.path);
+    return await processRivenScreenshot(capture.path);
+  } finally {
+    rivenCaptureInProgress = false;
+  }
+}
+
 async function captureRewardWithPaddle() {
   // This endpoint is exclusively for the post-opening reward window. It is
   // isolated from the relic-planner probe and never waits for slow Windows
@@ -807,6 +1156,7 @@ async function processScreenshot(imagePath, requiresStableCopy = true, maxAttemp
     } catch (error) {
       return { success: false, reason: `Unable to copy screenshot: ${error.message}` };
     }
+    trimDiagnosticScreenshots();
   }
   let lastResult = { success: false, reason: "OCR worker did not return a result." };
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -883,6 +1233,7 @@ async function processRefinementScreenshot(imagePath) {
   } catch (error) {
     return { success: false, reason: `Unable to copy refinement screenshot: ${error.message}` };
   }
+  trimDiagnosticScreenshots();
   const paddleProbe = await runPaddleWorker(snapshotPath, {
     left: 0,
     top: 0,
@@ -949,6 +1300,16 @@ const server = http.createServer((request, response) => {
       return sendJson(response, 500, { success: false, reason: `Unable to read recognized rewards: ${error.message}` });
     }
   }
+  if (request.method === "GET" && request.url === "/latest-riven") {
+    try {
+      if (!fs.existsSync(latestRivenPath)) {
+        return sendJson(response, 404, { success: false, reason: "No riven diagnostic capture is available yet." });
+      }
+      return sendJson(response, 200, JSON.parse(fs.readFileSync(latestRivenPath, "utf8")));
+    } catch (error) {
+      return sendJson(response, 500, { success: false, reason: `Unable to read riven diagnostic data: ${error.message}` });
+    }
+  }
   if (request.method === "POST" && request.url === "/audit") {
     let body = "";
     request.setEncoding("utf8");
@@ -964,6 +1325,31 @@ const server = http.createServer((request, response) => {
     });
     return;
   }
+  if (request.method === "POST" && request.url === "/audit-riven-native") {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      try {
+        const data = JSON.parse(body);
+        const diagnosticPath = path.join(
+          outputDirectory,
+          data && data.phase === "history-grade-readonly"
+            ? "latest-riven-history-diagnostic.json"
+            : data && data.phase === "chat-native-readonly"
+              ? "latest-riven-chat-native-diagnostic.json"
+              : "latest-riven-native-diagnostic.json"
+        );
+        fs.writeFileSync(diagnosticPath, JSON.stringify(data, null, 2), "utf8");
+        audit("RIVEN_NATIVE_DIAGNOSTIC", String(data && data.weaponName || "unknown"));
+        sendJson(response, 200, { success: true });
+      } catch (error) {
+        audit("RIVEN_NATIVE_DIAGNOSTIC_FAILED", error.message);
+        sendJson(response, 400, { success: false, reason: error.message });
+      }
+    });
+    return;
+  }
   if (request.method === "POST" && request.url === "/clear-reward") {
     try {
       if (fs.existsSync(latestRewardPath)) fs.unlinkSync(latestRewardPath);
@@ -971,6 +1357,16 @@ const server = http.createServer((request, response) => {
       return sendJson(response, 200, { success: true });
     } catch (error) {
       audit("LATEST_REWARD_CLEAR_FAILED", error.message);
+      return sendJson(response, 500, { success: false, reason: error.message });
+    }
+  }
+  if (request.method === "POST" && request.url === "/clear-riven") {
+    try {
+      if (fs.existsSync(latestRivenPath)) fs.unlinkSync(latestRivenPath);
+      audit("LATEST_RIVEN_CLEARED");
+      return sendJson(response, 200, { success: true });
+    } catch (error) {
+      audit("LATEST_RIVEN_CLEAR_FAILED", error.message);
       return sendJson(response, 500, { success: false, reason: error.message });
     }
   }
@@ -1003,6 +1399,30 @@ const server = http.createServer((request, response) => {
       audit(result.success ? "MATCH" : "NO_MATCH", result.era || result.reason || "");
       return sendJson(response, 200, result);
     });
+  }
+  if (request.method === "POST" && request.url === "/capture-riven") {
+    return captureRivenWithPaddle().then((result) => {
+      audit(result.success ? "RIVEN_CAPTURE_DONE" : "RIVEN_CAPTURE_NO_RESULT", result.reason || "");
+      return sendJson(response, 200, result);
+    });
+  }
+  if (request.method === "POST" && request.url === "/process-riven") {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        if (!data.path || typeof data.path !== "string" || !fs.existsSync(data.path)) {
+          return sendJson(response, 400, { success: false, reason: "Riven screenshot path is invalid." });
+        }
+        audit("RIVEN_NATIVE_PROCESS", data.path);
+        return sendJson(response, 200, await processRivenScreenshot(data.path));
+      } catch (error) {
+        return sendJson(response, 400, { success: false, reason: error.message });
+      }
+    });
+    return;
   }
   if (request.method === "POST" && request.url === "/process-refinement") {
     let body = "";
@@ -1101,6 +1521,7 @@ const server = http.createServer((request, response) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
+  trimDiagnosticScreenshots();
   startPaddleWorker().catch(() => { });
   process.stdout.write(`AlecaFrame Chinese relic OCR listening on ${port}\n`);
 });

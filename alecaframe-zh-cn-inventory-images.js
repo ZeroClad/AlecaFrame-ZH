@@ -27,8 +27,12 @@
     // Only update rendered cards. Updating the complete MOD/Arcane dataset
     // makes Vue begin loading hundreds of off-screen images at once.
     let updated = 0;
-    cards.forEach((card, index) => {
-      const item = app.items[index];
+    cards.forEach((card) => {
+      // The rendered MOD/Arcane cards are a filtered subset of app.items.
+      // Their indexes therefore cannot be used to identify the backing item.
+      const label = card.querySelector('.inventoryItemName > .normalItem');
+      const englishName = label?.textContent?.trim();
+      const item = app.items.find((candidate) => candidate?.name === englishName);
       if ((item?.type !== 'mod' && item?.type !== 'arcane') || !imageNames[item.name]) return;
       const image = card.querySelector('.inventoryLeftPart > .inventoryItemImage');
       if (!image) return;

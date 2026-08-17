@@ -10,6 +10,8 @@ $localizerSource = Join-Path $PSScriptRoot "alecaframe-zh-cn.js"
 $itemTranslationsSource = Join-Path $PSScriptRoot "alecaframe-zh-cn-items.js"
 $relicDucatsSource = Join-Path $PSScriptRoot "alecaframe-zh-cn-relic-ducats.js"
 $relicOcrBridgeSource = Join-Path $PSScriptRoot "alecaframe-zh-cn-relic-ocr.js"
+$rivenOcrBridgeSource = Join-Path $PSScriptRoot "alecaframe-zh-cn-riven-ocr.js"
+$rivenOverlaySource = Join-Path $PSScriptRoot "alecaframe-zh-cn-riven-overlay.js"
 $relicOverlaySource = Join-Path $PSScriptRoot "alecaframe-zh-cn-relic-overlay.js"
 $relicRecommendationSource = Join-Path $PSScriptRoot "alecaframe-zh-cn-relic-recommendation.js"
 $relicPlannerCacheSource = Join-Path $PSScriptRoot "alecaframe-zh-cn-relic-planner-cache.js"
@@ -39,6 +41,8 @@ $scriptTag = '<script src="assets/js/alecaframe-zh-cn.js"></script>'
 $itemTranslationsScriptTag = '<script src="assets/js/alecaframe-zh-cn-items.js"></script>'
 $relicDucatsScriptTag = '<script src="assets/js/alecaframe-zh-cn-relic-ducats.js"></script>'
 $relicOcrBridgeScriptTag = '<script src="assets/js/alecaframe-zh-cn-relic-ocr.js"></script>'
+$rivenOcrBridgeScriptTag = '<script src="assets/js/alecaframe-zh-cn-riven-ocr.js"></script>'
+$rivenOverlayScriptTag = '<script src="assets/js/alecaframe-zh-cn-riven-overlay.js"></script>'
 $relicOverlayScriptTag = '<script src="assets/js/alecaframe-zh-cn-relic-overlay.js"></script>'
 $relicRecommendationScriptTag = '<script src="assets/js/alecaframe-zh-cn-relic-recommendation.js"></script>'
 $relicPlannerCacheScriptTag = '<script src="assets/js/alecaframe-zh-cn-relic-planner-cache.js"></script>'
@@ -238,7 +242,7 @@ function Restore-OfficialFiles {
         Write-LauncherLog "Official OPK unavailable; created local official backup"
     }
 
-    foreach ($extraScript in @("alecaframe-zh-cn.js", "alecaframe-zh-cn-items.js", "alecaframe-zh-cn-relic-ducats.js", "alecaframe-zh-cn-relic-ocr.js", "alecaframe-zh-cn-relic-overlay.js", "alecaframe-zh-cn-relic-recommendation.js", "alecaframe-zh-cn-relic-planner-cache.js", "alecaframe-zh-cn-inventory-price-sync.js", "alecaframe-zh-cn-inventory-images.js")) {
+    foreach ($extraScript in @("alecaframe-zh-cn.js", "alecaframe-zh-cn-items.js", "alecaframe-zh-cn-relic-ducats.js", "alecaframe-zh-cn-relic-ocr.js", "alecaframe-zh-cn-riven-ocr.js", "alecaframe-zh-cn-riven-overlay.js", "alecaframe-zh-cn-relic-overlay.js", "alecaframe-zh-cn-relic-recommendation.js", "alecaframe-zh-cn-relic-planner-cache.js", "alecaframe-zh-cn-inventory-price-sync.js", "alecaframe-zh-cn-inventory-images.js")) {
         $extraLocalizer = Join-Path $VersionPath "web\assets\js\$extraScript"
         if (Test-Path -LiteralPath $extraLocalizer) {
             Remove-Item -LiteralPath $extraLocalizer -Force
@@ -278,6 +282,40 @@ function Add-ChineseFiles {
                     1
                 )
                 [IO.File]::WriteAllText($target, $patched, [Text.UTF8Encoding]::new($false))
+            }
+            $content = [IO.File]::ReadAllText($target, [Text.Encoding]::UTF8)
+            if (-not $content.Contains($rivenOcrBridgeScriptTag)) {
+                $patched = [regex]::Replace(
+                    $content,
+                    "(?i)</body>",
+                    "    $rivenOcrBridgeScriptTag`r`n</body>",
+                    1
+                )
+                [IO.File]::WriteAllText($target, $patched, [Text.UTF8Encoding]::new($false))
+            }
+        }
+        if ($EnableRelicOcr -and $relativePage -eq "rivenOverlay.html") {
+            $content = [IO.File]::ReadAllText($target, [Text.Encoding]::UTF8)
+            if (-not $content.Contains($rivenOverlayScriptTag)) {
+                $patched = [regex]::Replace(
+                    $content,
+                    "(?i)</body>",
+                    "    $rivenOverlayScriptTag`r`n</body>",
+                    1
+                )
+                [IO.File]::WriteAllText($target, $patched, [Text.UTF8Encoding]::new($false))
+            }
+            # Vue's original stat lists have no keys.  A short OCR frame can
+            # otherwise leave a previously rendered truncated row in the DOM
+            # after the canonical trait array has only three entries.
+            $content = [IO.File]::ReadAllText($target, [Text.Encoding]::UTF8)
+            $keyed = [regex]::Replace(
+                $content,
+                '(<div class="rivenDetailsStat (?:positive|negative)" v-for="stat in [^"]+")',
+                '$1 :key="stat.description"'
+            )
+            if ($keyed -ne $content) {
+                [IO.File]::WriteAllText($target, $keyed, [Text.UTF8Encoding]::new($false))
             }
         }
         if ($relativePage -eq "relicRecommendation.html") {
@@ -359,6 +397,12 @@ function Add-ChineseFiles {
     if ($EnableRelicOcr) {
         Copy-Item -LiteralPath $relicOcrBridgeSource `
             -Destination (Join-Path $webRoot "assets\js\alecaframe-zh-cn-relic-ocr.js") `
+            -Force
+        Copy-Item -LiteralPath $rivenOcrBridgeSource `
+            -Destination (Join-Path $webRoot "assets\js\alecaframe-zh-cn-riven-ocr.js") `
+            -Force
+        Copy-Item -LiteralPath $rivenOverlaySource `
+            -Destination (Join-Path $webRoot "assets\js\alecaframe-zh-cn-riven-overlay.js") `
             -Force
     }
     Copy-Item -LiteralPath $relicOverlaySource `
