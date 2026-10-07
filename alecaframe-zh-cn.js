@@ -2682,7 +2682,7 @@
     installResizeTranslationThrottle();
     installHuijiWikiRedirect();
     observeTranslations();
-    console.info("[AlecaFrame 中文补丁] 已加载");
+    console.info("[AlecaFrame-ZH] loaded");
   }
 
   if (document.readyState === "loading") {
