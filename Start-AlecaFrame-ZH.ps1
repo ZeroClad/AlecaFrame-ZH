@@ -242,7 +242,19 @@ function Restore-OfficialFiles {
         Write-LauncherLog "Official OPK unavailable; created local official backup"
     }
 
-    foreach ($extraScript in @("alecaframe-zh-cn.js", "alecaframe-zh-cn-items.js", "alecaframe-zh-cn-relic-ducats.js", "alecaframe-zh-cn-relic-ocr.js", "alecaframe-zh-cn-riven-ocr.js", "alecaframe-zh-cn-riven-overlay.js", "alecaframe-zh-cn-relic-overlay.js", "alecaframe-zh-cn-relic-recommendation.js", "alecaframe-zh-cn-relic-planner-cache.js", "alecaframe-zh-cn-inventory-price-sync.js", "alecaframe-zh-cn-inventory-images.js")) {
+    foreach ($extraScript in @(
+        "alecaframe-zh-cn.js",
+        "alecaframe-zh-cn-items.js",
+        "alecaframe-zh-cn-relic-ducats.js",
+        "alecaframe-zh-cn-relic-ocr.js",
+        "alecaframe-zh-cn-riven-ocr.js",
+        "alecaframe-zh-cn-riven-overlay.js",
+        "alecaframe-zh-cn-relic-overlay.js",
+        "alecaframe-zh-cn-relic-recommendation.js",
+        "alecaframe-zh-cn-relic-planner-cache.js",
+        "alecaframe-zh-cn-inventory-price-sync.js",
+        "alecaframe-zh-cn-inventory-images.js"
+    )) {
         $extraLocalizer = Join-Path $VersionPath "web\assets\js\$extraScript"
         if (Test-Path -LiteralPath $extraLocalizer) {
             Remove-Item -LiteralPath $extraLocalizer -Force
@@ -650,7 +662,10 @@ function alecaFrameZhCnRequestRewardCapture() {
 '@
     $mainContent = $mainContent.Replace($deployedPromiseRewardCaptureRequest, $synchronousRewardCaptureRequest)
     if (-not $mainContent.Contains('var alecaFrameZhCnRewardFallbackInProgress = false;')) {
-        $mainContent = $mainContent.Replace('var alecaFrameZhCnRewardCaptureEndpoint = "http://127.0.0.1:38147/capture-reward";', "var alecaFrameZhCnRewardCaptureEndpoint = `"http://127.0.0.1:38147/capture-reward`";`r`nvar alecaFrameZhCnRewardFallbackInProgress = false;`r`nvar alecaFrameZhCnRewardFallbackCompleted = false;")
+        $mainContent = $mainContent.Replace(
+            'var alecaFrameZhCnRewardCaptureEndpoint = "http://127.0.0.1:38147/capture-reward";',
+            "var alecaFrameZhCnRewardCaptureEndpoint = `"http://127.0.0.1:38147/capture-reward`";`r`nvar alecaFrameZhCnRewardFallbackInProgress = false;`r`nvar alecaFrameZhCnRewardFallbackCompleted = false;"
+        )
     }
     if (-not $mainContent.Contains('if (alecaFrameZhCnRewardFallbackInProgress || alecaFrameZhCnRewardFallbackCompleted) return;')) {
         $mainContent = $mainContent.Replace('function alecaFrameZhCnStartRewardFallback() {', "function alecaFrameZhCnStartRewardFallback() {`r`n    if (alecaFrameZhCnRewardFallbackInProgress || alecaFrameZhCnRewardFallbackCompleted) return;`r`n    alecaFrameZhCnRewardFallbackInProgress = true;")
